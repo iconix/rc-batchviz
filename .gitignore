@@ -1,0 +1,9 @@
+# virtual env
+batchviz/
+
+# embeddings files
+*.parquet
+
+# raw data files
+*.csv
+*.csv.bak
