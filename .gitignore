@@ -7,3 +7,4 @@ batchviz/
 # raw data files
 *.csv
 *.csv.bak
+*.json

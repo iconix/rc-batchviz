@@ -52,6 +52,7 @@ class ScriptConfig:
     metric: str
     gpu: bool
     topic_method: str
+    export_clusters: bool
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> 'ScriptConfig':
@@ -68,7 +69,8 @@ class ScriptConfig:
             components=args.components,
             metric=args.metric,
             gpu=args.gpu,
-            topic_method=args.topic_method
+            topic_method=args.topic_method,
+            export_clusters=args.export_clusters,
         )
 
 
@@ -76,11 +78,8 @@ class DataFields:
     # map from CSV field names to internal names
     MAPPING = {
         'Name': 'name',
-        'Location': 'location',
-        'Admission Pseudonym': 'admission_pseudonym',
         'Intro Call: Interests': 'intro_call_interests',
         'Intro Call: Background': 'intro_call_background',
-        'Return Recurser': 'return_recurser',
         'Welcome Post': 'welcome_post'
     }
     # fields that are derived/generated later
@@ -165,7 +164,7 @@ class Pseudonymizer:
 def read_csv_data(datafile: str) -> Generator[Dict, None, None]:
     """Read raw data from CSV file, yielding one row at a time"""
     with open(datafile, 'r', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile, fieldnames=DataFields.csv_names())
+        reader = csv.DictReader(csvfile)
 
         # skip header row
         next(reader, None)
@@ -173,7 +172,9 @@ def read_csv_data(datafile: str) -> Generator[Dict, None, None]:
         for row in reader:
             if not row['Location']:
                 continue
-            yield row
+            # skip unwanted columns
+            filtered_row = {key: value for key, value in row.items() if key in DataFields.csv_names()}
+            yield filtered_row
 
 
 def create_document(row: dict) -> str:
@@ -181,9 +182,10 @@ def create_document(row: dict) -> str:
     # if row['Intro Call: Background']:
     #     return f"---\ninterests: {row['Intro Call: Interests']}\nbackground: {row['Intro Call: Background']}\n---\n\n{row['Welcome Post']}\n"
     # else:
-    return f"---\ninterests: {row['Intro Call: Interests']}\n---\n\n{row['Welcome Post']}\n"
-    # return f"interests: {row['Intro Call: Interests']}"
+    #     return f"---\ninterests: {row['Intro Call: Interests']}\n---\n\n{row['Welcome Post']}\n"
 
+    # return f"interests: {row['Intro Call: Interests']}"
+    return f"---\ninterests: {row['Intro Call: Interests']}\n---\n\n{row['Welcome Post']}\n"
 
 def prepare_data(datafile: str, config: Optional[ScriptConfig] = None) -> list[dict]:
     """Prepare data from CSV, optionally with pseudonymization"""
@@ -192,7 +194,7 @@ def prepare_data(datafile: str, config: Optional[ScriptConfig] = None) -> list[d
 
     for row in read_csv_data(datafile):
         # convert CSV field names to internal names
-        processed = {DataFields.MAPPING[k]: v for k, v in row.items()}
+        processed = {DataFields.MAPPING[k]: v for k, v in row.items() if k in DataFields.csv_names()}
 
         if pseudonymizer:
             processed['name'] = pseudonymizer.get_pseudonym(
@@ -410,6 +412,39 @@ class TopicModeler:
             summaries['representative_sentences'] = self.extract_representative_sentences(**kwargs)
 
         return summaries if method == 'all' else summaries[method]
+
+    def get_cluster_documents_and_topics(self, method='all', **kwargs):
+        """Returns a dictionary mapping cluster IDs to documents and topic summaries"""
+        cluster_docs = {}
+
+        # get documents for each cluster
+        for topic in sorted(self.docs_df['Topic'].unique()):
+            topic_id = int(topic)
+            docs = [str(doc) for doc in self.docs_df[self.docs_df['Topic'] == topic]['Doc'].tolist()]
+            cluster_docs[topic_id] = {
+                "documents": docs,
+            }
+
+        # get topic summaries using existing methods
+        topic_summaries = self.get_topic_summaries(method=method, **kwargs)
+
+        # if method is 'all', add all summaries
+        if method == 'all':
+            for summary_type, summaries in topic_summaries.items():
+                for topic_id, summary in summaries.items():
+                    if isinstance(summary, list):
+                        # convert any tuples to lists for JSON serialization
+                        summary = [list(item) if isinstance(item, tuple) else item for item in summary]
+                    cluster_docs[int(topic_id)][summary_type] = summary
+        else:
+            # add single method summary
+            for topic_id, summary in topic_summaries.items():
+                if isinstance(summary, list):
+                    # convert any tuples to lists for JSON serialization
+                    summary = [list(item) if isinstance(item, tuple) else item for item in summary]
+                cluster_docs[int(topic_id)][method] = summary
+
+        return cluster_docs
 
 
 def compute_umap_clustering(data, n_neighbors=15, min_dist=0.1, n_components=2, metric='euclidean',
@@ -731,6 +766,9 @@ def parse_arguments() -> ScriptConfig:
                        choices=['tfidf', 'keybert', 'representative_sentences'],
                        default='tfidf',
                        help='Topic modeling method to use')
+    parser.add_argument('--export-clusters',
+                       action='store_true',
+                       help='Export cluster documents and topics to a JSON file')
     return ScriptConfig.from_args(parser.parse_args())
 
 
@@ -815,6 +853,19 @@ def main():
 
     # display in browser
     fig.show()
+
+    if config.export_clusters:
+        # extra stuff to extract cluster data and save to file
+        cluster_data = modeler.get_cluster_documents_and_topics(
+            method='all',
+            top_n=20
+        )
+        cluster_docs_file = config.output.replace('.html', '_cluster_data.json')
+        import json
+        with open(cluster_docs_file, 'w', encoding='utf-8') as f:
+            # use ensure_ascii=False to properly handle non-ascii characters
+            json.dump(cluster_data, f, indent=2, ensure_ascii=False)
+        print(f"cluster documents and topics saved to {cluster_docs_file}")
 
     # TODO:
     #   - add sliders to html output?
